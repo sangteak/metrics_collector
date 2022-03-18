@@ -2,7 +2,7 @@
 
 #include <thread>
 #include <array>
-#include "perf_interface.h"
+#include <vector>
 #include "mmf.h"
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -17,7 +17,7 @@
 // ** 공유 메모리에 주기적으로 데이터를 갱신하기 때문에 perfmon 또는 기타 툴을 이용해 해당 데이터를 읽어 기록해야함.
 // 
 // [샘플 코드]
-// class PerfQueue : public IPerfQueue
+// class MetricsQueue : public metrics::IQueue
 // {
 // public:
 // 	virtual bool TryPop(_element_t& task)
@@ -45,7 +45,7 @@
 // 	std::deque<_element_t> m_queue;
 // };
 // 
-// class PerfService : public IPerfService
+// class MetricsService : public metrics::IService
 // {
 // public:
 // 	enum eId : int32_t
@@ -54,8 +54,7 @@
 // 		SEND_PACKET_AMOUNT = 2,
 // 	};
 // 
-// 	//virtual bool Collect(const int32_t& id, const std::shared_ptr<PerfTask<>>& msg)
-// 	virtual bool Collect(const int32_t& id, _task_pack_t&& task) override
+// 	virtual bool Collect(const int32_t& id, metrics::_task_pack_t&& task) override
 // 	{
 // 		switch (id)
 // 		{
@@ -97,29 +96,30 @@
 // 
 // int main() 
 // {	
-// 	PerfService service;
-// 	using _perf_executor_t = PerfExecutor<PerfQueue>;
-// 	
-// 	_perf_executor_t perfExecutor;
-// 	perfExecutor.Run(
+// 	using _metrics_producer_t = metrics::Producer<MetricsQueue>;
+//
+//	auto service = std::static_pointer_cast<metrics::IService>(std::make_shared<MetricsService>())
+//
+// 	_metrics_producer_t producer;
+// 	producer.Run(
 // 		"Global\\sample_mmf",
-// 		std::static_pointer_cast<IPerfService>(std::make_shared<PerfService>()),
+// 		service,
 // 		1000,
-// 		_perf_executor_t::eThreadType::WORKER_THREAD
+// 		_metrics_producer_t::eThreadType::WORKER_THREAD
 // 	);
 // 
 // 	// 주기적 데이터 입력을 위한 쓰레드 생성
-// 	auto producer = std::thread([&perfExecutor]() {
+// 	auto producerWorkerThreadHandler = std::thread([&producer]() {
 // 
 // 		auto startTime = std::chrono::steady_clock::now();
 // 		auto endTime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count();
 // 
 // 		while (6000 > endTime)
 // 		{
-// 			_task_pack_t task(1000);
+// 			metrics::_task_pack_t task(1000);
 // 
 // 			// 수집기에 등록
-// 			perfExecutor.Put(PerfService::eId::SEND_PACKET_AMOUNT, std::move(task));
+// 			producer.Put(PerfService::eId::SEND_PACKET_AMOUNT, std::move(task));
 // 
 // 			std::this_thread::sleep_for(std::chrono::seconds(1));
 // 
@@ -127,23 +127,85 @@
 // 		}
 // 	});
 // 
-// 	producer.join();
+// 	producerWorkerThreadHandler.join();
 // 
 // 	std::this_thread::sleep_for(std::chrono::seconds(3));
 // 
 // 	std::cout << "terminate" << std::endl;
 // 
-// 	perfExecutor.Stop();
+// 	producer.Stop();
 // 
 // 	getchar();
 // 	
 // 	return 0;
 // }
 
-template <typename Queue>
-class PerfExecutor
+namespace metrics
 {
-	static_assert(std::is_base_of_v<IPerfQueue, Queue>, "A Queue had not inherit a IPerfQueue class.");
+template <typename Element, int MaxArguments>
+class Task
+{
+public:
+	Task()
+	{
+		m_data.fill(0);
+	}
+
+	template <typename... Args>
+	explicit Task(Args... args)
+		: Task()
+	{
+		static_assert(MaxArguments >= std::tuple_size<std::tuple<Args...>>{}, "The argument size is over MaxArguments.");
+		static_assert(std::disjunction<std::is_same<Element, Args>...>::value, "Wrong the Args type.");
+
+		Packed(std::make_tuple(args...), std::index_sequence_for<Args...>{});
+	}
+
+	~Task() = default;
+
+	template <int32_t N>
+	constexpr auto get()
+	{
+		static_assert(0 <= N && MaxArguments > N, "Wrong a N.");
+		return m_data.at(N);
+	}
+
+private:
+	template <typename Tuple, std::size_t... Is>
+	void Packed(const Tuple& t, std::index_sequence<Is...>)
+	{
+		((m_data[Is] = std::get<Is>(t)), ...);
+	}
+
+private:
+	std::array<Element, MaxArguments> m_data;
+};
+
+using _task_pack_t = Task<int, 10>;
+
+class IService
+{
+public:
+	virtual bool Collect(const int32_t& id, _task_pack_t&& task) = 0;
+	virtual bool Marshel(std::vector<int32_t>& result) = 0;
+	virtual void Reset() = 0;
+};
+
+class IQueue
+{
+public:
+	using _key_t = int;
+	using _value_t = _task_pack_t;
+	using _element_t = std::tuple<_key_t, _value_t>;
+
+	virtual bool TryPop(_element_t& task) = 0;
+	virtual void Put(_element_t&& task) = 0;
+};
+
+template <typename Queue>
+class Producer
+{
+	static_assert(std::is_base_of_v<IQueue, Queue>, "A Queue had not inherit a IPerfQueue class.");
 
 public:
 	static const int32_t MMF_WRITE_DEFAULT_INTERVAL_MS = 1000;
@@ -151,8 +213,8 @@ public:
 	using _key_t = int32_t;
 	using _value_t = _task_pack_t;
 	using _element_t = std::tuple<_key_t, _value_t>; // first : 구분 ID, second : 데이터(Repository 또는 원하는 포멧)
-	using _channel_t = std::shared_ptr<IPerfQueue>;
-	using _service_t = std::shared_ptr<IPerfService>;
+	using _channel_t = std::shared_ptr<IQueue>;
+	using _service_t = std::shared_ptr<IService>;
 	using _result_t = std::vector<int32_t>;
 	using _mmf_t = Mmf;
 
@@ -162,7 +224,7 @@ public:
 		WORKER_THREAD,
 	};
 
-	PerfExecutor()
+	Producer()
 		: m_isRun(false)
 		, m_nextTime(0)
 		, m_collectionIntervalMs(0)
@@ -170,7 +232,7 @@ public:
 		, m_channel(new Queue)
 	{
 	}
-	
+
 	// @fn bool Start(const std::string& t_mmfName, _service_t& t_service,	int32_t t_collectionIntervalMs,	eThreadType t_threadType)
 	// @brief 
 	// @return bool 
@@ -178,7 +240,7 @@ public:
 	// @param t_service 사용자가 정의한 서비스 객체
 	// @param t_collectionIntervalMs 공유 메모리 적재 간격
 	// @param t_threadType NONE(쓰레드 사용 안함), WOREKR_THREAD(별도 쓰레드 생성)
-	bool Start(const char* t_mmfName, _service_t& t_service, int32_t t_collectionIntervalMs, eThreadType t_threadType)
+	bool Run(const char* t_mmfName, _service_t& t_service, int32_t t_collectionIntervalMs, eThreadType t_threadType)
 	{
 		if (NO_ERROR != m_mmf.Open(t_mmfName))
 			return false;
@@ -207,7 +269,7 @@ public:
 
 				// 만일 쓰레드가 비정상적으로 종료됐을 경우 데이터가 쌓이는걸 방지하기 위해 실행 상태를 false로 변경한다.
 				m_isRun = false;
-			});
+				});
 		}
 
 		return true;
@@ -234,14 +296,14 @@ public:
 			return;
 
 		m_channel->Put(std::move(std::make_tuple(key, std::forward<_value_t>(value))));
- 		
+
 	}
 
 	void Collect(const uint64_t now)
 	{
 		if (false == m_isRun)
 			return;
-		
+
 		while (true == m_isRun)
 		{
 			_element_t task;
@@ -267,7 +329,7 @@ public:
 
 			// mmf에 쓰기 완료됐으므로 초기화합니다.
 			m_result.clear();
-			
+
 			m_nextTime = now + m_collectionIntervalMs;
 		}
 	}
@@ -296,3 +358,4 @@ private:
 	// 워커 쓰레드 핸들러
 	std::thread m_workerTh;
 };
+}
