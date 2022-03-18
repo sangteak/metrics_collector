@@ -9,9 +9,12 @@
 # 빌드
 - C++17 또는 최신 컴파일러 필요
 - cmake 3.0 이상 버전 필요
-- cmake -G 를 사용하여 Generators 확인
-- cmake ./ -G "Visual Studio 16 2019" // visual studio 2019 기준으로 작성
-- 솔루션 파일(.sln) 오픈하여 빌드
+- cmake 빌드(Visual Studio 2019 기준)
+```
+> cmake -G 를 사용하여 Generators 확인
+> cmake ./ -G "Visual Studio 16 2019"
+> 솔루션 파일(.sln) 오픈하여 빌드
+```
 
 # 사용 예
 ```cpp
